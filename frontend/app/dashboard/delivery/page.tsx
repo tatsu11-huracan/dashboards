@@ -1,308 +1,267 @@
-"use client";
-
-import { useState } from "react";
 import Link from "next/link";
 import KpiCard from "@/app/_components/KpiCard";
-import FlowDiagram, { FlowStep } from "@/app/_components/FlowDiagram";
 
-// ─── 輸入貨物配送 データ ──────────────────────────────────────────
-const DELIVERY_KPI = {
-  handoverCount: 1876,
-  sortingInProgress: 187,
-  chuteNoDataRate: 2.3,
-  loadedRate: 96.4,
-  deliveryCompleteRate: 95.8,
-  complete24hRate: 91.2,
-  returnRate: 5.8,
-  misdeliveryCount: 3,
-  driverProductivityAvg: 112,
-  vendorIssueCount: 7,
-  deliveryCostK: 892,
+type DeliverySiteKey = "kix" | "tokyo";
+
+const DELIVERY_SITES: Record<
+  DeliverySiteKey,
+  { label: string; routeLabel: string; rule: string }
+> = {
+  kix: {
+    label: "関西/関空",
+    routeLabel: "KIX",
+    rule:
+      "17:00便・18:30便の2波運用 / 仕分け締切超過は翌日繰越 / 持戻りは同日再配可否を即時判定",
+  },
+  tokyo: {
+    label: "東京/新木場",
+    routeLabel: "TOKYO",
+    rule:
+      "午前・午後便で積載率を監視 / 再配達指示は15:30まで同日反映 / 夜間は持戻り最小化優先",
+  },
 };
 
-const RETURN_REASONS = [
-  { reason: "不在",       count: 89, pct: 45.6 },
-  { reason: "住所不備",   count: 23, pct: 11.8 },
-  { reason: "顧客都合",   count: 38, pct: 19.5 },
-  { reason: "破損・汚損", count:  4, pct:  2.1 },
-  { reason: "ラベル破損", count: 11, pct:  5.6 },
-  { reason: "その他",     count: 30, pct: 15.4 },
-];
+function normalizeSite(site: string | string[] | undefined): DeliverySiteKey {
+  const value = Array.isArray(site) ? site[0] : site;
+  return value === "tokyo" ? "tokyo" : "kix";
+}
 
-const VENDOR_QUALITY = [
-  { vendor: "A社", out: 820, rate: 96.2, mis: 1 },
-  { vendor: "B社", out: 634, rate: 94.8, mis: 2 },
-  { vendor: "C社", out: 312, rate: 91.3, mis: 0 },
-  { vendor: "D社", out: 110, rate: 88.2, mis: 0 },
-];
-
-const DELIVERY_FLOW: FlowStep[] = [
-  { code: "D-01", name: "引渡し受領", dwellCount: 42 },
-  { code: "D-03", name: "仕分け",     dwellCount: 187 },
-  { code: "D-04", name: "Chute",      dwellCount: 8 },
-  { code: "D-06", name: "積込み",     dwellCount: 0 },
-  { code: "D-07", name: "配達中",     dwellCount: 0 },
-  { code: "D-08", name: "完了",       isTerminal: true },
-];
-
-// ─── 国内集荷 データ ─────────────────────────────────────────────
-const PICKUP_KPI = {
-  requestCount: 348,
-  todayCutRatio: 71.3,
-  contactPendingCount: 28,
-  driverAssignedRate: 88.5,
-  successRate: 82.4,
-  rescheduleRate: 12.1,
-  failCount: 61,
-  toSortingLeadTime: 3.2,
-  todayPredictedCount: 412,
+const KPI_DATA: Record<
+  DeliverySiteKey,
+  {
+    toSort: number;
+    sorted: number;
+    loading: number;
+    onRoute: number;
+    delivered: number;
+    attempted: number;
+    carryOver: number;
+    onTimeRate: number;
+    reDeliveryRate: number;
+    routeCapacity: number;
+  }
+> = {
+  kix: {
+    toSort: 1820,
+    sorted: 1762,
+    loading: 1694,
+    onRoute: 1620,
+    delivered: 1544,
+    attempted: 58,
+    carryOver: 31,
+    onTimeRate: 94.2,
+    reDeliveryRate: 8.7,
+    routeCapacity: 88.1,
+  },
+  tokyo: {
+    toSort: 2140,
+    sorted: 2055,
+    loading: 1978,
+    onRoute: 1886,
+    delivered: 1772,
+    attempted: 92,
+    carryOver: 47,
+    onTimeRate: 92.6,
+    reDeliveryRate: 10.9,
+    routeCapacity: 91.3,
+  },
 };
 
-const FAIL_REASONS = [
-  { reason: "荷物未準備",  count: 18, pct: 29.5 },
-  { reason: "不在",         count: 14, pct: 22.9 },
-  { reason: "ラベル未貼付", count: 12, pct: 19.7 },
-  { reason: "閉店/営業外", count:  9, pct: 14.8 },
-  { reason: "連絡不能",     count:  5, pct:  8.2 },
-  { reason: "住所不明",     count:  3, pct:  4.9 },
+const PIPELINE_STAGES = [
+  { code: "入荷", label: "配送依頼\n入荷" },
+  { code: "仕分", label: "仕分け\nルート振分" },
+  { code: "積込", label: "積み込み\n出発準備" },
+  { code: "配送", label: "配送中\n(ラストマイル)" },
+  { code: "完了", label: "配達完了\n実績確定" },
 ];
 
-const DRIVER_STATUS = [
-  { name: "田中 D", assigned: 24, completed: 19, status: "配達中" },
-  { name: "佐藤 D", assigned: 31, completed: 28, status: "帰庫" },
-  { name: "鈴木 D", assigned: 18, completed: 12, status: "配達中" },
-  { name: "高橋 D", assigned: 27, completed: 27, status: "完了" },
-  { name: "渡辺 D", assigned: 22, completed: 16, status: "配達中" },
-];
+const COUNTS: Record<DeliverySiteKey, number[]> = {
+  kix: [1820, 1762, 1694, 1620, 1544],
+  tokyo: [2140, 2055, 1978, 1886, 1772],
+};
 
-const PICKUP_FLOW: FlowStep[] = [
-  { code: "P-01", name: "集荷依頼受付",   dwellCount: PICKUP_KPI.requestCount },
-  { code: "P-03", name: "ドライバー配信", dwellCount: PICKUP_KPI.contactPendingCount },
-  { code: "P-05", name: "集荷実施",       dwellCount: 0 },
-  { code: "P-07", name: "配送投入",       dwellCount: 0 },
-  { code: "P-08", name: "仕分け接続",     isTerminal: true },
-];
+const ALERTS: Record<
+  DeliverySiteKey,
+  Array<{ label: string; count: number; level: "warn" | "danger" | "info" }>
+> = {
+  kix: [
+    { label: "仕分け遅延", count: 22, level: "warn" },
+    { label: "積載不足", count: 14, level: "info" },
+    { label: "再配達対象", count: 58, level: "danger" },
+    { label: "翌日繰越", count: 31, level: "danger" },
+  ],
+  tokyo: [
+    { label: "仕分け遅延", count: 35, level: "warn" },
+    { label: "積載不足", count: 20, level: "info" },
+    { label: "再配達対象", count: 92, level: "danger" },
+    { label: "翌日繰越", count: 47, level: "danger" },
+  ],
+};
 
-// ─── 輸入貨物配送 コンテンツ ──────────────────────────────────────
-function DeliveryContent() {
-  const totalReturn = RETURN_REASONS.reduce((s, r) => s + r.count, 0);
-  return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-3 gap-3 lg:grid-cols-6">
-        <KpiCard label="引渡し件数" value={DELIVERY_KPI.handoverCount} unit="件" status="normal" />
-        <KpiCard label="仕分け中" value={DELIVERY_KPI.sortingInProgress} unit="件" status={DELIVERY_KPI.sortingInProgress > 200 ? "warning" : "normal"} />
-        <KpiCard label="Chute NO_DATA率" value={DELIVERY_KPI.chuteNoDataRate} unit="%" target="1%以下" status={DELIVERY_KPI.chuteNoDataRate > 1 ? "warning" : "normal"} />
-        <KpiCard label="積込率" value={DELIVERY_KPI.loadedRate} unit="%" target="100%" status={DELIVERY_KPI.loadedRate < 95 ? "warning" : "normal"} />
-        <KpiCard label="配達完了率" value={DELIVERY_KPI.deliveryCompleteRate} unit="%" target="95%" status={DELIVERY_KPI.deliveryCompleteRate >= 95 ? "normal" : "warning"} highlight />
-        <KpiCard label="24h達成率" value={DELIVERY_KPI.complete24hRate} unit="%" target="90%" status={DELIVERY_KPI.complete24hRate >= 90 ? "normal" : "warning"} highlight />
-      </div>
-      <div className="grid grid-cols-3 gap-3 lg:grid-cols-5">
-        <KpiCard label="持ち戻り率" value={DELIVERY_KPI.returnRate} unit="%" target="5%以下" status={DELIVERY_KPI.returnRate <= 5 ? "normal" : "warning"} />
-        <KpiCard label="誤配件数（月次）" value={DELIVERY_KPI.misdeliveryCount} unit="件" target="10件以下" status={DELIVERY_KPI.misdeliveryCount <= 10 ? "normal" : "critical"} />
-        <KpiCard label="ドライバー生産性" value={DELIVERY_KPI.driverProductivityAvg} unit="件/日" target="100件" status={DELIVERY_KPI.driverProductivityAvg >= 100 ? "normal" : "warning"} />
-        <KpiCard label="業者品質問題件数" value={DELIVERY_KPI.vendorIssueCount} unit="件" status={DELIVERY_KPI.vendorIssueCount > 10 ? "warning" : "normal"} />
-        <KpiCard label="配送原価（速報）" value={DELIVERY_KPI.deliveryCostK} unit="千円" status="normal" />
-      </div>
+const ALERT_COLOR = {
+  info: "bg-sky-50 border-sky-300 text-sky-800",
+  warn: "bg-orange-50 border-orange-300 text-orange-800",
+  danger: "bg-red-50 border-red-400 text-red-800",
+};
 
-      <FlowDiagram steps={DELIVERY_FLOW} />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <div className="bg-white rounded-lg shadow-sm p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-700">持ち戻り理由別</h3>
-            <span className="text-xs text-gray-400">合計 {totalReturn}件</span>
-          </div>
-          <div className="space-y-2.5">
-            {RETURN_REASONS.map((item) => (
-              <div key={item.reason} className="flex items-center gap-3">
-                <div className="w-20 text-xs text-gray-600 shrink-0">{item.reason}</div>
-                <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                  <div className="h-full bg-amber-400 rounded-full" style={{ width: `${item.pct}%` }} />
-                </div>
-                <div className="w-8 text-right text-xs font-semibold text-gray-700">{item.count}</div>
-                <div className="w-10 text-right text-xs text-gray-400">{item.pct}%</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow-sm p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">業者別品質</h3>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-gray-500 border-b border-gray-100">
-                <th className="text-left py-1.5 font-medium">業者</th>
-                <th className="text-right py-1.5 font-medium">持ち出し</th>
-                <th className="text-right py-1.5 font-medium">完了率</th>
-                <th className="text-right py-1.5 font-medium">誤配</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {VENDOR_QUALITY.map((v) => (
-                <tr key={v.vendor} className={v.rate < 90 ? "bg-red-50" : ""}>
-                  <td className="py-1.5 font-medium">{v.vendor}</td>
-                  <td className="text-right">{v.out.toLocaleString()}</td>
-                  <td className={`text-right font-semibold ${v.rate < 90 ? "text-red-600" : v.rate < 95 ? "text-amber-600" : "text-green-600"}`}>{v.rate}%</td>
-                  <td className="text-right">{v.mis}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="text-[10px] text-gray-400 mt-3">専属判定: 100件/日以上 ｜ 18:30カットオフ・20時積込完了基準</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── 国内集荷 コンテンツ ──────────────────────────────────────────
-function PickupContent() {
-  return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-3 gap-3 lg:grid-cols-6">
-        <KpiCard label="集荷依頼件数" value={PICKUP_KPI.requestCount} unit="件" sub={`予定 ${PICKUP_KPI.todayPredictedCount}件`} status="normal" />
-        <KpiCard label="12時カット当日比率" value={PICKUP_KPI.todayCutRatio} unit="%" target="70%" status={PICKUP_KPI.todayCutRatio >= 70 ? "normal" : "warning"} />
-        <KpiCard label="連絡未了件数" value={PICKUP_KPI.contactPendingCount} unit="件" status={PICKUP_KPI.contactPendingCount > 30 ? "warning" : "normal"} />
-        <KpiCard label="アプリ配信済率" value={PICKUP_KPI.driverAssignedRate} unit="%" target="90%" status={PICKUP_KPI.driverAssignedRate >= 90 ? "normal" : "warning"} />
-        <KpiCard label="集荷成功率" value={PICKUP_KPI.successRate} unit="%" target="95%" status={PICKUP_KPI.successRate >= 95 ? "normal" : "warning"} highlight />
-        <KpiCard label="再集荷率" value={PICKUP_KPI.rescheduleRate} unit="%" target="10%以下" status={PICKUP_KPI.rescheduleRate <= 10 ? "normal" : "warning"} />
-      </div>
-      <div className="grid grid-cols-3 gap-3 lg:grid-cols-3">
-        <KpiCard label="集荷失敗件数" value={PICKUP_KPI.failCount} unit="件" status={PICKUP_KPI.failCount > 60 ? "warning" : "normal"} />
-        <KpiCard label="集荷→配送投入LT" value={PICKUP_KPI.toSortingLeadTime} unit="h" target="4h以内" status={PICKUP_KPI.toSortingLeadTime <= 4 ? "normal" : "warning"} />
-        <KpiCard label="本日集荷予定数" value={PICKUP_KPI.todayPredictedCount} unit="件" status="normal" />
-      </div>
-
-      <FlowDiagram steps={PICKUP_FLOW} />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <div className="bg-white rounded-lg shadow-sm p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-700">集荷失敗理由別件数</h3>
-            <span className="text-xs text-gray-400">合計 {PICKUP_KPI.failCount}件</span>
-          </div>
-          <div className="space-y-2.5">
-            {FAIL_REASONS.map((item) => (
-              <div key={item.reason} className="flex items-center gap-3">
-                <div className="w-24 text-xs text-gray-600 shrink-0">{item.reason}</div>
-                <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                  <div className="h-full bg-red-400 rounded-full" style={{ width: `${item.pct}%` }} />
-                </div>
-                <div className="w-8 text-right text-xs font-semibold text-gray-700">{item.count}</div>
-                <div className="w-10 text-right text-xs text-gray-400">{item.pct}%</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow-sm p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">ドライバー状況</h3>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-gray-500 border-b border-gray-100">
-                <th className="text-left py-1.5 font-medium">ドライバー</th>
-                <th className="text-right py-1.5 font-medium">担当</th>
-                <th className="text-right py-1.5 font-medium">完了</th>
-                <th className="text-right py-1.5 font-medium">達成率</th>
-                <th className="py-1.5 pl-2 font-medium">状況</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {DRIVER_STATUS.map((d) => {
-                const rate = Math.round((d.completed / d.assigned) * 100);
-                return (
-                  <tr key={d.name}>
-                    <td className="py-1.5">{d.name}</td>
-                    <td className="text-right">{d.assigned}</td>
-                    <td className="text-right">{d.completed}</td>
-                    <td className={`text-right font-semibold ${rate >= 90 ? "text-green-600" : "text-amber-600"}`}>{rate}%</td>
-                    <td className="pl-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                        d.status === "完了" ? "bg-green-100 text-green-700" :
-                        d.status === "帰庫" ? "bg-gray-100 text-gray-600" :
-                        "bg-blue-100 text-blue-700"
-                      }`}>{d.status}</span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          <div className="mt-4 pt-3 border-t border-gray-100">
-            <div className="text-xs font-medium text-gray-600 mb-2">12時カット区分</div>
-            <div className="flex gap-2 text-xs">
-              <div className="flex-1 bg-green-50 rounded p-2 text-center">
-                <div className="text-green-700 font-bold text-lg">{PICKUP_KPI.requestCount}</div>
-                <div className="text-green-600 text-[10px]">当日確定</div>
-              </div>
-              <div className="flex-1 bg-amber-50 rounded p-2 text-center">
-                <div className="text-amber-700 font-bold text-lg">{PICKUP_KPI.contactPendingCount}</div>
-                <div className="text-amber-600 text-[10px]">連絡中</div>
-              </div>
-              <div className="flex-1 bg-red-50 rounded p-2 text-center">
-                <div className="text-red-700 font-bold text-lg">{PICKUP_KPI.failCount}</div>
-                <div className="text-red-600 text-[10px]">失敗</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── ページ本体 ───────────────────────────────────────────────────
-type Tab = "delivery" | "pickup";
-const TABS: { key: Tab; label: string }[] = [
-  { key: "delivery", label: "輸入貨物配送（新木場）" },
-  { key: "pickup",   label: "国内集荷（TikTok / TEMU）" },
-];
-
-export default function DeliveryDashboardPage() {
-  const [tab, setTab] = useState<Tab>("delivery");
+export default async function DeliveryDashboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ site?: string | string[] }>;
+}) {
+  const sp = await searchParams;
+  const siteKey = normalizeSite(sp?.site);
+  const site = DELIVERY_SITES[siteKey];
+  const kpi = KPI_DATA[siteKey];
+  const counts = COUNTS[siteKey];
+  const alerts = ALERTS[siteKey];
+  const summary = {
+    smooth: kpi.delivered,
+    wait: kpi.attempted,
+    over: Math.max(0, kpi.attempted - 50),
+    tmr: kpi.carryOver,
+  };
 
   return (
-    <div className="min-h-screen">
-      {/* トップバー */}
-      <div className="bg-gray-900 text-white px-6 py-2.5 flex items-center justify-between">
+    <div className="min-h-screen bg-gradient-to-b from-[#eef4ff] to-[#f4f7fb]">
+      <div className="bg-[#111827] text-white px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/" className="text-gray-400 hover:text-white text-xs flex items-center gap-1 transition-colors">
-            ← 部門一覧
+          <Link href="/" className="text-gray-400 hover:text-white text-xs transition-colors">
+            ← 全体
           </Link>
           <span className="text-gray-600">|</span>
-          <span className="text-sm font-semibold">配送部</span>
+          <span className="text-sm font-bold">配送部ダッシュボード</span>
         </div>
-        <span className="text-[10px] text-gray-500">ESP3.0 ダッシュボード</span>
-      </div>
-
-    <div className="p-6 space-y-5">
-      <div>
-        <h2 className="text-xl font-bold text-gray-900">配送部ダッシュボード</h2>
-        <p className="text-sm text-gray-500 mt-0.5">集計日: 2026-06-16 ｜ 更新: 07:05 JST</p>
-      </div>
-
-      {/* タブ */}
-      <div className="border-b border-gray-200">
-        <div className="flex">
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                tab === t.key
-                  ? "border-blue-500 text-blue-600"
-                  : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-gray-500 mr-1">拠点</span>
+          {Object.entries(DELIVERY_SITES).map(([key, item]) => (
+            <Link
+              key={key}
+              href={`/dashboard/delivery?site=${key}`}
+              className={`px-3 py-1 rounded-full border transition-colors ${
+                siteKey === key
+                  ? "bg-white text-gray-900 border-white font-semibold"
+                  : "text-gray-300 border-gray-700 hover:border-gray-400 hover:text-white"
               }`}
             >
-              {t.label}
-            </button>
+              {item.label}
+            </Link>
           ))}
         </div>
       </div>
 
-      {tab === "delivery" ? <DeliveryContent /> : <PickupContent />}
-    </div>
+      <div className="px-5 py-4 space-y-4 max-w-[1440px] mx-auto">
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-black text-[#172033] tracking-tight">配送 横型フローボード</h1>
+            <span className="inline-flex items-center rounded-full border border-amber-500 bg-amber-100 px-3 py-0.5 text-[11px] font-extrabold text-amber-700">
+              モック寄せ
+            </span>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            拠点: {site.label} ({site.routeLabel}) 集計日: 2026-06-16 更新: 08:05 JST
+          </p>
+          <p className="text-xs text-gray-500 mt-1">
+            左右の流量を可視化し、下チップで滞留・再配達・翌日繰越を把握する構成です。
+          </p>
+        </div>
+
+        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 text-xs text-blue-900 font-medium">
+          {site.rule}
+        </div>
+
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="rounded-xl border-2 border-emerald-600 bg-emerald-100 px-4 py-3">
+            <div className="text-[11px] font-bold text-emerald-800">順流（当日完了）</div>
+            <div className="text-3xl font-black text-emerald-900 leading-none mt-1">{summary.smooth.toLocaleString()}</div>
+            <div className="text-[11px] text-emerald-700 mt-1">配達完了</div>
+          </div>
+          <div className="rounded-xl border-2 border-amber-500 bg-amber-100 px-4 py-3">
+            <div className="text-[11px] font-bold text-amber-800">要対応（再配達）</div>
+            <div className="text-3xl font-black text-amber-900 leading-none mt-1">{summary.wait.toLocaleString()}</div>
+            <div className="text-[11px] text-amber-700 mt-1">当日リカバリ候補</div>
+          </div>
+          <div className="rounded-xl border-2 border-red-500 bg-red-100 px-4 py-3">
+            <div className="text-[11px] font-bold text-red-800">超過アラート</div>
+            <div className="text-3xl font-black text-red-900 leading-none mt-1">{summary.over.toLocaleString()}</div>
+            <div className="text-[11px] text-red-700 mt-1">監視閾値超過</div>
+          </div>
+          <div className="rounded-xl border-2 border-violet-500 bg-violet-100 px-4 py-3">
+            <div className="text-[11px] font-bold text-violet-800">翌日繰越</div>
+            <div className="text-3xl font-black text-violet-900 leading-none mt-1">{summary.tmr.toLocaleString()}</div>
+            <div className="text-[11px] text-violet-700 mt-1">翌日便で処理</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+          <KpiCard label="仕分け対象" value={kpi.toSort} unit="件" status="normal" />
+          <KpiCard label="仕分け完了" value={kpi.sorted} unit="件" status="normal" />
+          <KpiCard label="積込完了" value={kpi.loading} unit="件" status="normal" />
+          <KpiCard label="配送中" value={kpi.onRoute} unit="件" status="normal" />
+          <KpiCard label="配達完了" value={kpi.delivered} unit="件" status="normal" />
+          <KpiCard label="再配達対象" value={kpi.attempted} unit="件" status={kpi.attempted > 80 ? "critical" : "warning"} highlight />
+          <KpiCard label="翌日繰越" value={kpi.carryOver} unit="件" status={kpi.carryOver > 40 ? "critical" : "warning"} />
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <KpiCard label="時間内完了率" value={kpi.onTimeRate} unit="%" target="94%" status={kpi.onTimeRate >= 94 ? "normal" : "warning"} />
+          <KpiCard label="再配達率" value={kpi.reDeliveryRate} unit="%" target="9%" status={kpi.reDeliveryRate <= 9 ? "normal" : "warning"} />
+          <KpiCard label="積載率" value={kpi.routeCapacity} unit="%" target="90%" status={kpi.routeCapacity >= 90 ? "normal" : "warning"} />
+        </div>
+
+        <div className="bg-white border border-gray-200 rounded-2xl p-4 overflow-x-auto">
+          <div className="border-2 border-dashed border-gray-500 bg-gray-100 rounded-xl px-4 py-2 flex flex-wrap items-center gap-2 text-xs text-gray-700">
+            <span className="bg-gray-600 text-white rounded px-2 py-0.5 font-bold">保税側（前工程・点線）</span>
+            <span>許可確認</span><span className="text-gray-400">-&gt;</span>
+            <span>搬出スキャン</span><span className="text-gray-400">-&gt;</span>
+            <span>業者別仕分け</span><span className="text-gray-400">-&gt;</span>
+            <span className="font-bold text-[#1f4e79]">集荷・引渡し</span>
+          </div>
+          <div className="flex justify-center my-1">
+            <div className="h-6 border-l-2 border-dashed border-gray-500 relative">
+              <span className="absolute left-2 top-1 whitespace-nowrap text-[10px] font-bold text-gray-500">▼ 前工程からの引渡し連携</span>
+            </div>
+          </div>
+
+          <div className="flex min-w-[980px] items-start gap-0">
+            {PIPELINE_STAGES.map((stage, idx) => (
+              <div key={stage.code} className="flex items-start">
+                <div className="flex w-[152px] flex-col items-center">
+                  <div className="w-full bg-[#dbe9f9] border-[1.5px] border-[#1f4e79] rounded-xl p-2 text-center min-h-[86px]">
+                    <div className="text-[11px] font-black text-[#1f4e79] leading-tight whitespace-pre-line">{stage.label}</div>
+                    <div className="text-2xl font-black tabular-nums mt-1">{counts[idx].toLocaleString()}</div>
+                    <div className="text-[10px] text-gray-500">件</div>
+                  </div>
+                </div>
+                {idx < PIPELINE_STAGES.length - 1 && (
+                  <div className="flex w-[72px] flex-shrink-0 flex-col items-center pt-7">
+                    <div className="text-[11px] font-bold text-blue-600 mb-1 whitespace-nowrap">
+                      {(counts[idx] - counts[idx + 1]).toLocaleString()}
+                    </div>
+                    <div className="h-2.5 w-full rounded bg-[repeating-linear-gradient(90deg,#2563eb_0_8px,#bfdbfe_8px_16px)] [background-size:16px_100%]" />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+            {alerts.map((item) => (
+              <div key={item.label} className={`rounded-lg border px-3 py-2 ${ALERT_COLOR[item.level]}`}>
+                <div className="text-[11px] font-semibold">{item.label}</div>
+                <div className="text-xl font-black mt-0.5">{item.count}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-gray-500">
+            <span className="flex items-center gap-1"><span className="inline-block w-4 h-2 rounded bg-[#dbe9f9] border border-[#1f4e79]" />通常工程</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-4 h-2 rounded bg-orange-100 border border-orange-400" />滞留</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-4 h-2 rounded bg-red-100 border border-red-500" />超過</span>
+            <span className="flex items-center gap-1"><span className="inline-block w-4 h-2 rounded bg-violet-100 border border-violet-500" />翌日繰越</span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
