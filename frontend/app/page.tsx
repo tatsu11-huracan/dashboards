@@ -1,43 +1,58 @@
-async function getUsers() {
-  const res = await fetch("http://localhost:3000/api/users", {
-    cache: "no-store",
-  });
+import DashboardHeader from "@/components/dashboard/DashboardHeader";
+import FilterBar from "@/components/dashboard/FilterBar";
+import SummaryCards from "@/components/dashboard/SummaryCards";
+import ProcessFlowPanel from "@/components/dashboard/ProcessFlowPanel";
+import ExceptionPanel from "@/components/dashboard/ExceptionPanel";
+import CaseTable from "@/components/dashboard/CaseTable";
+import {
+  getCases,
+  getExceptionItems,
+  getProcessSections,
+  getSummaryMetrics,
+  type BranchFilter,
+} from "@/lib/mockData";
 
-  if (!res.ok) {
-    throw new Error("ユーザー取得に失敗しました");
-  }
-
-  return res.json();
+function normalizeBranch(input: string | undefined): BranchFilter {
+  return input === "KIX" || input === "NRT" ? input : "ALL";
 }
 
-type User = {
-  id: number;
-  name: string;
-  email: string;
-  created_at: string;
-};
+export default async function OverallDashboardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ branch?: string; q?: string }>;
+}) {
+  const sp = await searchParams;
+  const branch = normalizeBranch(sp?.branch);
+  const keyword = sp?.q ?? "";
 
-export default async function Home() {
-  const users: User[] = await getUsers();
+  const cases = getCases(branch, keyword);
+  const summary = getSummaryMetrics(cases);
+  const processSections = getProcessSections(cases);
+  const exceptionItems = getExceptionItems(cases);
+
+  const now = new Intl.DateTimeFormat("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date());
 
   return (
-    <main className="p-8">
-      <h1 className="text-2xl font-bold mb-4">Users</h1>
+    <main className="min-h-screen bg-gray-100 px-4 py-5 md:px-6 lg:px-8">
+      <div className="max-w-[1440px] mx-auto space-y-4">
+        <DashboardHeader
+          title="全体ダッシュボード"
+          subtitle={`通関・保税・配送の状態ベース監視 ｜ 更新: ${now}`}
+        />
 
-      {users.length === 0 ? (
-        <p>ユーザーがまだ登録されていません。</p>
-      ) : (
-        <ul className="space-y-2">
-          {users.map((user) => (
-            <li key={user.id} className="border rounded p-4">
-              <div>ID: {user.id}</div>
-              <div>Name: {user.name}</div>
-              <div>Email: {user.email}</div>
-              <div>Created At: {user.created_at}</div>
-            </li>
-          ))}
-        </ul>
-      )}
+        <FilterBar branch={branch} keyword={keyword} />
+        <SummaryCards metrics={summary} />
+        <ProcessFlowPanel sections={processSections} />
+        <ExceptionPanel items={exceptionItems} />
+        <CaseTable cases={cases} />
+      </div>
     </main>
   );
 }
