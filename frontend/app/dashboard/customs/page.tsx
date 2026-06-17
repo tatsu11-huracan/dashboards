@@ -1,295 +1,489 @@
+"use client";
+import { useState } from "react";
 import Link from "next/link";
-import { pool } from "@/lib/db";
-import KpiCard from "@/app/_components/KpiCard";
 
-type CustomsSiteKey = "kix" | "nrt";
+type LaneNode = {
+  name: string;
+  subtext: string;
+  value: number;
+};
 
-const CUSTOMS_SITES: Record<CustomsSiteKey, { label: string; locationCode: string; routeLabel: string; rule: string }> = {
-  kix: {
-    label: "関西/関空", locationCode: "KIX", routeLabel: "KIX",
-    rule: "15時までに突合→当日処理（15時以降の追加は翌日）　／　キャセイ・ANAは搬出予約必須　／　24hフリータイム超過でターミナルコスト　／　E-Naccs表記統一・区分2/3警告閾値は確認待ち"
+type BranchNode = {
+  label: string;
+  value: number;
+  status?: string;
+};
+
+const mockData = {
+  sidebar: {
+    dashboard: [
+      { label: "通関フロー", value: 1284, active: true },
+      { label: "未申告在庫", value: 74 },
+      { label: "未許可在庫", value: 49 },
+      { label: "滅却予定", value: 12 },
+    ],
+    locations: [
+      { label: "大阪/関西", value: 812 },
+      { label: "東京/成田・新木場", value: 472 },
+    ],
   },
-  nrt: {
-    label: "関東/成田", locationCode: "NRT", routeLabel: "NRT",
-    rule: "前日到着分の翌日処理が中心　／　17:30以降のOUTなし　／　許可済み未搬出は48h超で警告　／　区分2/3が15%超で警告"
+  kpis: [
+    { label: "本日対象件数", value: 1284, subtext: "データ受取済み" },
+    { label: "3条件合流済み", value: 956, subtext: "PKGへ進行" },
+    { label: "未申告在庫", value: 74, subtext: "予備審査側で停止" },
+    { label: "未許可在庫", value: 49, subtext: "本申告後に滞留" },
+    { label: "許可済み", value: 824, subtext: "搬出可能" },
+    { label: "搬出済み", value: 768, subtext: "配送/次工程へ" },
+  ],
+  leftLane: [
+    { name: "データ受取", subtext: "API / メール / 2.0", value: 1284 },
+    { name: "HS/アイテムコード", subtext: "1課・通関士確認", value: 1162 },
+    { name: "データ加工/クレンジング", subtext: "名前/住所/価格/重量/品名", value: 1084 },
+    { name: "通関士チェック", subtext: "OK / 未申告在庫へ分岐", value: 1030 },
+    { name: "NACCS申告準備", subtext: "予備審査側の合流条件", value: 956 },
+  ],
+  leftLaneBranch: [
+    { label: "OK", value: 956 },
+    { label: "未申告在庫", value: 74 },
+  ],
+  mergeNode: {
+    value: 956,
+    text: "3条件完了",
+    subtext: "PKGへ",
+  },
+  rightLane: [
+    { name: "ATA", subtext: "到着", value: 1196 },
+    { name: "OLT", subtext: "横持ち/搬出手配", value: 1112 },
+    { name: "OUT", subtext: "一次側搬出", value: 1034 },
+    { name: "BIN", subtext: "エスポリア側搬入登録", value: 982 },
+  ],
+  pkgBranches: {
+    top: [
+      { label: "区分1", value: 824, status: "許可済み" },
+      { label: "区分2", value: 83, status: "税関対応待ち" },
+      { label: "区分3", value: 49, status: "書類確認追加" },
+    ],
+    bottom: [
+      { label: "未許可在庫", value: 49, status: "継続対応" },
+      { label: "滅却予定", value: 12, status: "終了系" },
+      { label: "搬出", value: 768, status: "次工程へ" },
+    ],
+  },
+  alerts: [
+    { status: "未申告在庫", condition: "要確認", count: 74, color: "red" },
+    { status: "税関対応待ち", condition: "区分2", count: 83, color: "amber" },
+    { status: "書類確認追加", condition: "区分3", count: 49, color: "amber" },
+    { status: "滅却予定", condition: "終了系", count: 12, color: "red" },
+    { status: "搬出済み", condition: "完了", count: 768, color: "green" },
+  ],
+  routeDecisions: [
+    {
+      region: "大阪/関西：集約利用・通常",
+      value: 488,
+      steps: "1課：HS確認 → 2課：クレンジング → 2課：NACCS",
+      active: true,
+    },
+    {
+      region: "大阪/関西：集約非利用",
+      value: 176,
+      steps: "2課：データ入手 → クレンジング → NACCS",
+    },
+    {
+      region: "大阪/関西：特定顧客・点数多い",
+      value: 148,
+      steps: "2課：先に加工 → 1課：HS確認 → 2課：再整備",
+    },
+    {
+      region: "東京/成田・新木場",
+      value: 472,
+      steps: "加工者：クレンジング → 通関士：HS確認/申告判断",
+    },
+  ],
+  progress: {
+    percentage: 59.8,
+    legend: ["許可/搬出", "審査中", "滞留"],
   },
 };
 
-function normalizeSite(site: string | string[] | undefined): CustomsSiteKey {
-  const v = Array.isArray(site) ? site[0] : site;
-  return v === "nrt" ? "nrt" : "kix";
+function fmt(n: number): string {
+  return n.toLocaleString("ja-JP");
 }
 
-async function getLocationRules(locationCode: string) {
-  try {
-    const result = await pool.query(
-      `SELECT rule_key, rule_value, rule_description FROM business_location_rule
-       WHERE tenant_id='ESP3' AND business_location_code=$1
-         AND is_displayed_on_dashboard=1
-         AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
-       ORDER BY display_order`,
-      [locationCode]
-    );
-    return result.rows as { rule_key: string; rule_value: string; rule_description: string }[];
-  } catch { return []; }
+function getConditionColor(color: string) {
+  switch (color) {
+    case "red":
+      return "bg-[#fee2e2] text-[#dc2626] border border-[#fecaca]";
+    case "amber":
+      return "bg-[#fef3c7] text-[#d97706] border border-[#fde68a]";
+    case "green":
+      return "bg-[#d1fae5] text-[#059669] border border-[#a7f3d0]";
+    default:
+      return "bg-[#e2e8f0] text-[#475569] border border-[#cbd5e1]";
+  }
 }
 
-// KPIモック（拠点別）
-const KPI_DATA: Record<CustomsSiteKey, {
-  received: number; merged: number; undeclared: number; unpermitted: number;
-  permitted: number; released: number;
-  kubun1: number; kubun2: number; kubun3: number;
-  permitRate: number; naccsRate: number; hpkHitRate: number;
-  ltHours: number; permitPendingShipout: number;
-  staffCustoms: number; staffProcessing: number; personnelCostK: number;
-}> = {
-  kix: {
-    received: 9000, merged: 8200, undeclared: 322, unpermitted: 285,
-    permitted: 7890, released: 7750,
-    kubun1: 7450, kubun2: 320, kubun3: 120,
-    permitRate: 96.5, naccsRate: 91.2, hpkHitRate: 88.7,
-    ltHours: 5.2, permitPendingShipout: 140,
-    staffCustoms: 7, staffProcessing: 10, personnelCostK: 718,
-  },
-  nrt: {
-    received: 7000, merged: 6400, undeclared: 215, unpermitted: 198,
-    permitted: 6020, released: 5840,
-    kubun1: 5680, kubun2: 240, kubun3: 100,
-    permitRate: 95.8, naccsRate: 89.4, hpkHitRate: 86.1,
-    ltHours: 22.1, permitPendingShipout: 198,
-    staffCustoms: 5, staffProcessing: 8, personnelCostK: 554,
-  },
-};
-
-// 滞留チップ
-const DWELL_DATA: Record<CustomsSiteKey, Array<{ stage: string; label: string; count: number; overCount?: number; level: "normal" | "warn" | "danger" | "tmr"; recovery?: string }>> = {
-  kix: [
-    { stage: "データ受領→HS確認", label: "HS確認待ち", count: 120, level: "warn", recovery: "HS確認後にクレンジングへ進行" },
-    { stage: "クレンジング中", label: "クレンジング滞留", count: 38, level: "normal", recovery: "現物確認後に解消" },
-    { stage: "通関士チェック", label: "未申告在庫", count: 322, level: "danger", overCount: 0, recovery: "書類整備後に申告へ" },
-    { stage: "申告→区分判定", label: "区分2/3（追加審査中）", count: 285, overCount: 70, level: "danger", recovery: "税関回答後に許可or再申告" },
-    { stage: "HPK待ち", label: "HPKエラー", count: 25, level: "warn", recovery: "要因解消→再実行" },
-    { stage: "搬出待ち", label: "⏰ 翌日繰越", count: 140, level: "tmr", recovery: "翌日便カットライン管理" },
-  ],
-  nrt: [
-    { stage: "データ受領→HS確認", label: "HS確認待ち", count: 95, level: "warn" },
-    { stage: "クレンジング中", label: "クレンジング滞留", count: 28, level: "normal" },
-    { stage: "通関士チェック", label: "未申告在庫", count: 215, level: "danger", overCount: 0 },
-    { stage: "申告→区分判定", label: "区分2/3（追加審査中）", count: 198, overCount: 55, level: "danger" },
-    { stage: "HPK待ち", label: "HPKエラー", count: 18, level: "warn" },
-    { stage: "搬出待ち", label: "⏰ 翌日繰越", count: 198, level: "tmr" },
-  ],
-};
-
-// パイプラインステージ
-const PIPELINE_STAGES = [
-  { code: "受領", label: "データ受領\n（API/メール）" },
-  { code: "HS確認", label: "HS/アイテムコード\n確認" },
-  { code: "クレンジング", label: "データ加工\nクレンジング" },
-  { code: "申告準備", label: "通関士チェック\nNACCS準備" },
-  { code: "HPK", label: "申告・HPK\n（保税側）" },
-  { code: "区分判定", label: "区分1/2/3\n区分判定" },
-  { code: "許可", label: "許可\n（搬出可）" },
-];
-
-const COUNTS: Record<CustomsSiteKey, number[]> = {
-  kix: [9000, 8760, 8522, 8200, 8200, 7890, 7750],
-  nrt: [7000, 6820, 6640, 6400, 6400, 6020, 5840],
-};
-
-const CHIP_COLOR = {
-  normal: "bg-yellow-50 border-yellow-400 text-yellow-800",
-  warn: "bg-orange-50 border-orange-400 text-orange-800",
-  danger: "bg-red-50 border-red-500 text-red-800",
-  tmr: "bg-violet-50 border-violet-400 text-violet-800",
-};
-
-export default async function CustomsDashboardPage({
-  searchParams,
-}: {
-  searchParams?: Promise<{ site?: string | string[] }>;
-}) {
-  const sp = await searchParams;
-  const siteKey = normalizeSite(sp?.site);
-  const site = CUSTOMS_SITES[siteKey];
-  const kpi = KPI_DATA[siteKey];
-  const dwells = DWELL_DATA[siteKey];
-  const counts = COUNTS[siteKey];
-  const locationRules = await getLocationRules(site.locationCode);
-
+function Sidebar() {
   return (
-    <div className="min-h-screen bg-[#f4f7fb]">
-      {/* トップバー */}
-      <div className="bg-[#111827] text-white px-6 py-3 flex items-center justify-between">
+    <aside className="hidden lg:block fixed left-0 top-0 h-screen w-[264px] bg-[#111827] text-white border-r border-[#334155]/45">
+      <div className="p-6 border-b border-[#334155]/45">
         <div className="flex items-center gap-3">
-          <Link href="/" className="text-gray-400 hover:text-white text-xs transition-colors">← 全体</Link>
-          <span className="text-gray-600">|</span>
-          <span className="text-sm font-bold">通関部ダッシュボード</span>
+          <div className="w-[34px] h-[34px] rounded-[10px] bg-gradient-to-br from-[#2563eb] to-[#059669] flex items-center justify-center text-white font-bold text-sm shadow-[0_4px_12px_rgba(37,99,235,0.34)]">
+            通
+          </div>
+          <div>
+            <h1 className="font-extrabold text-[18px] tracking-[-0.01em]">ESPORIA</h1>
+            <p className="text-[11px] text-[#94a3b8]">Customs Control</p>
+          </div>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-gray-500 mr-1">拠点</span>
-          {Object.entries(CUSTOMS_SITES).map(([key, item]) => (
-            <Link key={key} href={`/dashboard/customs?site=${key}`}
-              className={`px-3 py-1 rounded-full border transition-colors ${siteKey === key ? "bg-white text-gray-900 border-white font-semibold" : "text-gray-300 border-gray-700 hover:border-gray-400 hover:text-white"}`}>
-              {item.label}
-            </Link>
+      </div>
+
+      <div className="p-6 border-b border-[#334155]/45">
+        <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#94a3b8] mb-4">Dashboard</h2>
+        <div className="space-y-3">
+          {mockData.sidebar.dashboard.map((item, idx) => (
+            <div
+              key={idx}
+              className={`flex items-center justify-between px-3.5 py-3 rounded-[12px] cursor-pointer transition border ${
+                item.active
+                  ? "bg-[#1e293b] text-white border-[#334155]"
+                  : "bg-transparent text-[#cbd5e1] border-transparent hover:bg-[#1f2937]"
+              }`}
+            >
+              <span className="text-sm font-medium">{item.label}</span>
+              <span className="bg-[#1f2937] text-white text-xs font-bold px-2.5 py-1 rounded-full tabular-nums">
+                {fmt(item.value)}
+              </span>
+            </div>
           ))}
         </div>
       </div>
 
-      <div className="px-5 py-4 space-y-4 max-w-[1440px] mx-auto">
-
-        {/* ヘッダー */}
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-black text-[#172033] tracking-tight">通関ダッシュボード｜予備審査 × 貨物ルート</h1>
-            <p className="text-sm text-gray-500 mt-1">拠点: {site.label} ({site.routeLabel})　集計日: 2026-06-16　更新: 08:05 JST</p>
-          </div>
-          <div className="flex gap-2 text-sm flex-wrap">
-            <div className="bg-white border border-gray-200 rounded-xl px-4 py-2 text-center">
-              <div className="text-xs text-gray-400">通関士</div>
-              <div className="text-xl font-black text-blue-600">{kpi.staffCustoms}名</div>
+      <div className="p-6">
+        <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#94a3b8] mb-4">Locations</h2>
+        <div className="space-y-2.5">
+          {mockData.sidebar.locations.map((item, idx) => (
+            <div key={idx} className="flex items-center justify-between text-[#cbd5e1] text-sm bg-[#0f172a] rounded-[12px] px-3 py-2.5 border border-[#334155]/40">
+              <span className="text-[13px]">{item.label}</span>
+              <span className="bg-[#1f2937] text-white text-xs font-bold px-2.5 py-1 rounded-full tabular-nums">
+                {fmt(item.value)}
+              </span>
             </div>
-            <div className="bg-white border border-gray-200 rounded-xl px-4 py-2 text-center">
-              <div className="text-xs text-gray-400">加工</div>
-              <div className="text-xl font-black text-blue-600">{kpi.staffProcessing}名</div>
-            </div>
-            <div className="bg-white border border-gray-200 rounded-xl px-4 py-2 text-center">
-              <div className="text-xs text-gray-400">人件費速報</div>
-              <div className="text-xl font-black text-gray-800">{kpi.personnelCostK}千円</div>
-            </div>
-          </div>
-        </div>
-
-        {/* ルールバー */}
-        <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 text-xs text-blue-900 font-medium">
-          {locationRules.length > 0
-            ? locationRules.map(r => `${r.rule_value}${r.rule_description ? ` — ${r.rule_description}` : ""}`).join("　／　")
-            : site.rule}
-        </div>
-
-        {/* サマリーカード */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KpiCard label="本日対象件数" value={kpi.received.toLocaleString()} unit="件" status="normal" />
-          <KpiCard label="3条件合流済み" value={kpi.merged.toLocaleString()} unit="件" sub={`合流率 ${((kpi.merged/kpi.received)*100).toFixed(1)}%`} status="normal" />
-          <KpiCard label="未申告在庫" value={kpi.undeclared.toLocaleString()} unit="件" status={kpi.undeclared > 300 ? "warning" : "normal"} highlight />
-          <KpiCard label="未許可在庫" value={kpi.unpermitted.toLocaleString()} unit="件" status={kpi.unpermitted > 200 ? "warning" : "normal"} highlight />
-          <KpiCard label="許可済み" value={kpi.permitted.toLocaleString()} unit="件" status="normal" />
-          <KpiCard label="搬出済み" value={kpi.released.toLocaleString()} unit="件" status="normal" />
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <KpiCard label="許可率" value={kpi.permitRate} unit="%" target="97%" status={kpi.permitRate >= 97 ? "normal" : "warning"} />
-          <KpiCard label="E-Naccs投入済率" value={kpi.naccsRate} unit="%" target="90%" status={kpi.naccsRate >= 90 ? "normal" : "warning"} />
-          <KpiCard label="HPKに間に合った率" value={kpi.hpkHitRate} unit="%" target="90%" status={kpi.hpkHitRate >= 90 ? "normal" : "warning"} />
-          <KpiCard label="到着→許可リードタイム" value={kpi.ltHours} unit="h" target={siteKey==="kix"?"6h":"24h"} status={kpi.ltHours <= (siteKey==="kix"?6:24) ? "normal" : "warning"} />
-          <KpiCard label="許可済み未搬出" value={kpi.permitPendingShipout} unit="件" status={kpi.permitPendingShipout > 100 ? "warning" : "normal"} />
-          <KpiCard label="区分2/3比率" value={`${(((kpi.kubun2+kpi.kubun3)/kpi.permitted)*100).toFixed(1)}`} unit="%" target="15%以下" status={(kpi.kubun2+kpi.kubun3)/kpi.permitted > 0.15 ? "warning" : "normal"} />
-        </div>
-
-        {/* 保税上段レーン */}
-        <div className="border-2 border-dashed border-gray-400 rounded-xl bg-gray-100 px-5 py-3 flex flex-wrap items-center gap-3 text-gray-600 text-sm">
-          <span className="bg-gray-500 text-white text-xs font-bold px-2 py-0.5 rounded whitespace-nowrap">保税側（参考・点線）</span>
-          {["APK/PKG", "OUT・横持ち", "BIN登録", "突合（申告/マニ/IDA）"].map((s, i, arr) => (
-            <span key={s} className="flex items-center gap-2 font-semibold text-xs">
-              {s}{i < arr.length - 1 && <span className="text-gray-400">─▶</span>}
-            </span>
           ))}
-          <span className="text-blue-700 font-bold text-xs">─▶ HPK実行 ※保税の仕事</span>
         </div>
-        <div className="flex justify-center">
-          <div className="relative h-6 w-px border-l-2 border-dashed border-gray-400">
-            <span className="absolute left-2 top-1 text-[11px] text-gray-500 whitespace-nowrap font-bold">▼ HPKステータス連携（17時時点で判定）</span>
-          </div>
-        </div>
+      </div>
 
-        {/* 横型パイプライン */}
-        <div className="bg-white border border-gray-200 rounded-2xl p-4 overflow-x-auto">
-          <div className="flex items-start gap-0" style={{minWidth: "1100px"}}>
-            {PIPELINE_STAGES.map((stage, idx) => (
-              <div key={stage.code} className="flex items-start">
-                {/* ステージカード */}
-                <div className="flex flex-col items-center" style={{width: "140px"}}>
-                  <div className="w-full bg-[#dbe9f9] border-2 border-[#1f4e79] rounded-xl p-2 text-center min-h-[86px]">
-                    <div className="text-[11px] font-black text-[#1f4e79] leading-tight whitespace-pre-line">{stage.label}</div>
-                    <div className="text-2xl font-black tabular-nums mt-1">{counts[idx].toLocaleString()}</div>
-                    <div className="text-[10px] text-gray-500">件</div>
-                  </div>
-                  {/* 滞留チップ */}
-                  {dwells.filter(d => d.stage.includes(stage.code.replace("確認","").replace("クレンジング","クレンジング").replace("申告","申告"))).length > 0 && (
-                    <div className="mt-2 flex flex-col gap-1 w-full">
-                      <div className="self-center border-l-2 border-dotted border-amber-500 h-2.5" />
-                      {dwells.filter(d => d.stage.includes(stage.code.replace("確認","").slice(0,4))).map(d => (
-                        <div key={d.label} className={`text-[10px] font-bold rounded-lg px-2 py-1 border text-center ${CHIP_COLOR[d.level]}`}>
-                          <div className="text-base font-black tabular-nums leading-none">{d.count}<span className="text-[10px]">件</span></div>
-                          <div>{d.label}</div>
-                          {d.overCount !== undefined && d.overCount > 0 && <div className="text-red-600">超過{d.overCount}</div>}
-                          {d.recovery && <div className="text-green-700 mt-0.5">{d.recovery}</div>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                {/* コネクタ（最後以外） */}
-                {idx < PIPELINE_STAGES.length - 1 && (
-                  <div className="flex flex-col items-center pt-7 flex-shrink-0" style={{width: "72px"}}>
-                    <div className="text-[11px] font-bold text-blue-600 mb-1 whitespace-nowrap">
-                      {(counts[idx] - counts[idx+1]).toLocaleString()}
-                    </div>
-                    <div className="w-full h-2.5 rounded"
-                      style={{background: "repeating-linear-gradient(90deg, #2563eb 0 8px, #bfdbfe 8px 16px)", backgroundSize: "16px 100%"}} />
-                  </div>
-                )}
-              </div>
+      <div className="absolute bottom-6 left-6 right-6">
+        <Link href="/" className="text-[#94a3b8] text-xs hover:text-[#e2e8f0] transition">
+          ← 全体へ戻る
+        </Link>
+      </div>
+    </aside>
+  );
+}
+
+function Header() {
+  const [filter, setFilter] = useState("全体");
+
+  return (
+    <header className="px-4 lg:px-6 pt-4 lg:pt-6">
+      <div className="rounded-[18px] border border-[#d7dee9] bg-white/95 shadow-[0_10px_30px_rgba(15,23,42,0.04)] px-5 lg:px-6 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h2 className="text-[22px] lg:text-[28px] leading-[1.2] font-extrabold tracking-[-0.025em] text-[#172033]">
+              通関ダッシュボード｜予備審査 × 貨物ルート
+            </h2>
+            <p className="text-[13px] lg:text-[14px] text-[#64748b] mt-2">
+              分岐別の滞留数、3条件合流、区分1/2/3を一画面で確認するサンプル画面
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            {["全体", "大阪/関西", "東京/成田"].map((label) => (
+              <button
+                key={label}
+                onClick={() => setFilter(label)}
+                className={`px-4 py-2.5 rounded-[12px] text-sm font-semibold border transition ${
+                  filter === label
+                    ? "bg-[#111827] text-white border-[#111827]"
+                    : "bg-white text-[#475569] border-[#d7dee9] hover:bg-[#f8fafc]"
+                }`}
+              >
+                {label}
+              </button>
             ))}
-          </div>
-
-          {/* 凡例 */}
-          <div className="flex flex-wrap gap-3 mt-4 text-[11px] text-gray-500">
-            <span className="flex items-center gap-1"><span className="inline-block w-5 h-3 rounded bg-[#dbe9f9] border-2 border-[#1f4e79]" />通常工程（通過件数）</span>
-            <span className="flex items-center gap-1"><span className="inline-block w-5 h-3 rounded bg-yellow-50 border border-yellow-400" />滞留（KPI内）</span>
-            <span className="flex items-center gap-1"><span className="inline-block w-5 h-3 rounded bg-red-50 border border-red-500" />滞留大 / <span className="text-red-600 font-bold">超過n</span>=KPIオーバー</span>
-            <span className="flex items-center gap-1"><span className="inline-block w-5 h-3 rounded bg-violet-50 border border-violet-400" />⏰ 翌日へ繰越</span>
-          </div>
-        </div>
-
-        {/* 区分別 + 不備在庫 */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {/* 区分別 */}
-          <div className="bg-white border border-gray-200 rounded-2xl p-4">
-            <h3 className="text-sm font-black text-gray-800 mb-3">申告区分別件数</h3>
-            {[
-              { label: "区分1（即許可）", count: kpi.kubun1, pct: ((kpi.kubun1/kpi.permitted)*100).toFixed(1), color: "bg-green-500" },
-              { label: "区分2（審査）", count: kpi.kubun2, pct: ((kpi.kubun2/kpi.permitted)*100).toFixed(1), color: "bg-amber-500" },
-              { label: "区分3（検査）", count: kpi.kubun3, pct: ((kpi.kubun3/kpi.permitted)*100).toFixed(1), color: "bg-red-500" },
-            ].map(item => (
-              <div key={item.label} className="flex items-center gap-3 mb-3">
-                <div className="w-28 text-xs text-gray-700 font-medium shrink-0">{item.label}</div>
-                <div className="flex-1 bg-gray-100 rounded-full h-5 overflow-hidden">
-                  <div className={`h-full ${item.color} rounded-full`} style={{width: `${item.pct}%`}} />
-                </div>
-                <div className="w-14 text-right text-sm font-bold text-gray-800">{item.count.toLocaleString()}</div>
-                <div className="w-10 text-right text-xs text-gray-500">{item.pct}%</div>
-              </div>
-            ))}
-            <p className="text-[10px] text-gray-400 mt-2">区分2/3合計が15%超で警告対象</p>
-          </div>
-
-          {/* 速報原価 */}
-          <div className="bg-white border border-gray-200 rounded-2xl p-4">
-            <h3 className="text-sm font-black text-gray-800 mb-3">速報原価</h3>
-            <div className="space-y-2">
-              {[
-                { label: "人件費（速報）", value: `${kpi.personnelCostK}千円` },
-                { label: "許可1件単価", value: `${Math.round(kpi.personnelCostK*1000/kpi.permitted)}円`, note: "目標 280円" },
-                { label: "処理能力（件/人時）", value: `${Math.round(kpi.permitted/(kpi.staffCustoms+kpi.staffProcessing))}件` },
-              ].map(item => (
-                <div key={item.label} className="flex items-center justify-between border-b border-gray-100 pb-2">
-                  <span className="text-sm text-gray-600">{item.label}</span>
-                  <span className="font-bold text-gray-900">{item.value}{item.note && <span className="text-xs text-gray-400 ml-2">({item.note})</span>}</span>
-                </div>
-              ))}
+            <div className="px-4 py-2.5 rounded-[12px] text-sm font-medium border border-[#d7dee9] bg-white text-[#64748b]">
+              対象日：2026/05/21
             </div>
-            <p className="text-[10px] text-gray-400 mt-2">速報値: マスター単価×実績人数。確定値は翌月10日以降。</p>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function KPICard({ label, value, subtext }: { label: string; value: number; subtext: string }) {
+  return (
+    <div className="bg-white rounded-[16px] border border-[#d7dee9] p-[14px] shadow-[0_6px_18px_rgba(15,23,42,0.05)]">
+      <div className="text-[12px] font-medium text-[#64748b]">{label}</div>
+      <div className="text-[28px] leading-none tracking-[-0.03em] font-extrabold text-[#172033] mt-2 tabular-nums">
+        {fmt(value)}
+      </div>
+      <div className="text-[12px] text-[#64748b] mt-2">{subtext}</div>
+    </div>
+  );
+}
+
+function FlowNode({ name, subtext, value }: LaneNode) {
+  return (
+    <div className="bg-white rounded-[15px] border border-[#d7dee9] p-4 shadow-[0_6px_16px_rgba(15,23,42,0.045)]">
+      <div className="flex items-start justify-between">
+        <div className="pr-2">
+          <div className="font-bold text-[#172033] text-[14px]">{name}</div>
+          <div className="text-[11px] text-[#64748b] mt-1 leading-relaxed">{subtext}</div>
+        </div>
+        <div className="bg-[#dbeafe] text-[#2563eb] px-3 py-1 rounded-full font-bold text-sm ml-2 whitespace-nowrap tabular-nums">
+          {fmt(value)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlowLane({ title, subtitle, nodes, branch }: { title: string; subtitle: string; nodes: LaneNode[]; branch?: BranchNode[] }) {
+  return (
+    <div className="rounded-[18px] border border-[#d7dee9] bg-[#f8fafc] p-4 min-h-[640px]">
+      <div className="mb-4 pb-3 border-b border-[#e2e8f0]">
+        <h4 className="font-bold text-[#172033] text-sm">{title}</h4>
+        <p className="text-[11px] text-[#64748b] mt-1">{subtitle}</p>
+      </div>
+
+      <div className="space-y-2">
+        {nodes.map((node, idx) => (
+          <div key={idx} className="relative pb-4 last:pb-0">
+            <FlowNode {...node} />
+            {idx < nodes.length - 1 && (
+              <div className="absolute left-1/2 -translate-x-1/2 top-full h-4 w-[2px] bg-[#cbd5e1] rounded-full" />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {branch && (
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          {branch.map((item, idx) => (
+            <div
+              key={idx}
+              className={`rounded-[12px] border p-3 text-center ${
+                idx === 0 ? "bg-[#d1fae5] border-[#a7f3d0]" : "bg-[#fee2e2] border-[#fecaca]"
+              }`}
+            >
+              <div className="font-bold text-[#172033] text-[13px]">{item.label}</div>
+              <div className="text-[24px] leading-none tracking-[-0.02em] font-extrabold text-[#172033] mt-2 tabular-nums">
+                {fmt(item.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MergeNode({ value, text, subtext }: { value: number; text: string; subtext: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center">
+      <div className="bg-[#111827] text-white rounded-[18px] py-6 px-3 text-center shadow-[0_14px_30px_rgba(17,24,39,0.34)] w-[86px]">
+        <div className="text-[34px] leading-none tracking-[-0.03em] font-extrabold tabular-nums">{fmt(value)}</div>
+        <div className="text-[12px] font-bold mt-2 leading-tight">{text}</div>
+        <div className="text-[11px] text-[#cbd5e1] mt-1">{subtext}</div>
+      </div>
+    </div>
+  );
+}
+
+function BranchContainer({ branches, title, badge }: { branches: BranchNode[]; title: string; badge?: number }) {
+  return (
+    <div className="bg-white rounded-[18px] border-2 border-[#1e3a8a] p-4 shadow-[0_8px_20px_rgba(30,58,138,0.06)]">
+      <div className="flex items-center justify-between mb-4">
+        <div className="font-bold text-[#172033] text-sm">{title}</div>
+        {badge && (
+          <div className="bg-[#dbeafe] text-[#2563eb] px-3 py-1 rounded-full font-bold text-sm tabular-nums">
+            {fmt(badge)}
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {branches.map((item, idx) => (
+          <div key={idx} className="bg-white rounded-[14px] p-3 border border-[#d7dee9] shadow-[0_2px_8px_rgba(15,23,42,0.03)]">
+            <div className="font-bold text-[#172033] text-sm">{item.label}</div>
+            <div className="text-[24px] leading-none tracking-[-0.02em] font-extrabold text-[#172033] mt-2 tabular-nums">
+              {fmt(item.value)}
+            </div>
+            <div className="text-[11px] text-[#64748b] mt-2">{item.status}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AlertTable() {
+  return (
+    <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] overflow-hidden">
+      <div className="bg-white px-5 py-4 border-b border-[#d7dee9]">
+        <h3 className="font-bold text-[#172033] text-sm">分岐アラート</h3>
+        <p className="text-[12px] text-[#64748b] mt-1">滞留をクリックして詳細リストへ遷移する想定</p>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-[#f8fafc] border-b border-[#d7dee9]">
+          <tr>
+            <th className="px-5 py-3 text-left text-[12px] font-bold text-[#64748b]">分岐</th>
+            <th className="px-5 py-3 text-center text-[12px] font-bold text-[#64748b]">状態</th>
+            <th className="px-5 py-3 text-right text-[12px] font-bold text-[#64748b]">件数</th>
+          </tr>
+        </thead>
+        <tbody>
+          {mockData.alerts.map((alert, idx) => (
+            <tr key={idx} className="border-b border-[#e2e8f0] hover:bg-[#f8fafc]">
+              <td className="px-5 py-3.5 font-medium text-[#172033]">{alert.status}</td>
+              <td className="px-5 py-3.5 text-center">
+                <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-bold ${getConditionColor(alert.color)}`}>
+                  {alert.condition}
+                </span>
+              </td>
+              <td className="px-5 py-3.5 text-right font-extrabold text-[#172033] tabular-nums">{fmt(alert.count)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RouteDecisionCard({ region, value, steps, active }: { region: string; value: number; steps: string; active?: boolean }) {
+  return (
+    <div
+      className={`rounded-[14px] border p-4 shadow-[0_4px_14px_rgba(15,23,42,0.04)] transition ${
+        active ? "bg-[#eff6ff] border-[#60a5fa]" : "bg-white border-[#d7dee9]"
+      }`}
+    >
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex-1">
+          <div className={`text-sm font-bold ${active ? "text-[#1e3a8a]" : "text-[#172033]"}`}>{region}</div>
+        </div>
+        <div className="bg-[#dbeafe] text-[#2563eb] px-3 py-1 rounded-full font-bold text-sm ml-2 whitespace-nowrap tabular-nums">
+          {fmt(value)}
+        </div>
+      </div>
+      <div className="text-[12px] text-[#64748b] leading-relaxed">{steps}</div>
+    </div>
+  );
+}
+
+function ProgressCard() {
+  return (
+    <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-5">
+      <h3 className="font-bold text-[#172033] text-sm">処理進捗</h3>
+      <p className="text-[12px] text-[#64748b] mt-1">本日対象に対する搬出率</p>
+
+      <div className="mt-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm font-bold text-[#172033]">搬出済み</span>
+          <span className="text-[22px] leading-none tracking-[-0.02em] font-extrabold text-[#172033] tabular-nums">
+            {mockData.progress.percentage}%
+          </span>
+        </div>
+        <div className="w-full bg-[#e2e8f0] rounded-full h-3 overflow-hidden">
+          <div className="w-[59.8%] h-full rounded-full bg-gradient-to-r from-[#059669] to-[#2563eb]" />
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-4 text-[12px] text-[#64748b]">
+        {mockData.progress.legend.map((item, idx) => (
+          <div key={idx} className="flex items-center gap-2">
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                idx === 0 ? "bg-[#059669]" : idx === 1 ? "bg-[#d97706]" : "bg-[#dc2626]"
+              }`}
+            />
+            {item}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 pt-4 border-t border-[#e2e8f0] text-[11px] text-[#64748b] leading-relaxed">
+        ※数値は画面サンプル用の仮データ。実装時はステータス別APIから件数を集計し、各ノード押下で対象リストに遷移。
+      </div>
+    </div>
+  );
+}
+
+export default function CustomsDashboard() {
+  return (
+    <div className="min-h-screen bg-[linear-gradient(180deg,#eef4ff_0%,#f4f7fb_22%,#f4f7fb_100%)] text-[#172033]">
+      <Sidebar />
+
+      <div className="lg:ml-[264px]">
+        <Header />
+
+        <div className="px-4 lg:px-6 pt-4 pb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3 lg:gap-4">
+            {mockData.kpis.map((kpi, idx) => (
+              <KPICard key={idx} {...kpi} />
+            ))}
+          </div>
+        </div>
+
+        <div className="px-4 lg:px-6 pb-8">
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+            <div className="xl:col-span-2 bg-white/95 rounded-[18px] border border-[#d7dee9] shadow-[0_12px_32px_rgba(15,23,42,0.05)] p-5">
+              <div className="mb-5 pb-4 border-b border-[#d7dee9] flex items-end justify-between">
+                <div>
+                  <h3 className="text-[16px] font-bold text-[#172033]">フロー別ステータス数</h3>
+
+                  <p className="text-[12px] text-[#64748b] mt-1">左：予備審査ルート / 右：貨物ルート。中央で3条件合流。</p>
+                </div>
+                <p className="text-[11px] text-[#64748b]">単位：件</p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_88px_minmax(0,1fr)] gap-4 items-start">
+                <FlowLane title="予備審査ルート" subtitle="データ処理" nodes={mockData.leftLane} branch={mockData.leftLaneBranch} />
+
+                <div className="hidden lg:flex justify-center pt-24">
+                  <MergeNode {...mockData.mergeNode} />
+                </div>
+
+                <div>
+                  <FlowLane title="貨物ルート" subtitle="現物ステータス" nodes={mockData.rightLane} />
+                  <div className="mt-3">
+                    <BranchContainer
+                      title="PKG → 本申告NACCS"
+                      badge={956}
+                      branches={[
+                        ...mockData.pkgBranches.top,
+                        ...mockData.pkgBranches.bottom,
+                      ]}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <AlertTable />
+
+              <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-4">
+                <h3 className="font-bold text-[#172033] text-sm mb-1">予備審査ルート判定</h3>
+                <p className="text-[12px] text-[#64748b] mb-4">大阪と東京で順序が異なる点を明示</p>
+                <div className="space-y-3">
+                  {mockData.routeDecisions.map((route, idx) => (
+                    <RouteDecisionCard key={idx} {...route} />
+                  ))}
+                </div>
+              </div>
+
+              <ProgressCard />
+            </div>
           </div>
         </div>
       </div>
