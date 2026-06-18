@@ -1,6 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import type { OperationalInsights } from "@/lib/customs/operational";
 
 type LaneNode = {
   name: string;
@@ -12,6 +14,31 @@ type BranchNode = {
   label: string;
   value: number;
   status?: string;
+};
+
+type AlertSeverity = "High" | "Medium" | "Low";
+
+type AlertItem = {
+  status: string;
+  condition: string;
+  count: number;
+  color: string;
+  severity: AlertSeverity;
+  owner: string;
+  maxAgingMinutes: number;
+};
+
+type AgingBucket = {
+  label: string;
+  count: number;
+  tone: "normal" | "warning" | "danger";
+};
+
+type AgingRow = {
+  label: string;
+  over30: number;
+  over60: number;
+  over120: number;
 };
 
 const mockData = {
@@ -28,12 +55,42 @@ const mockData = {
     ],
   },
   kpis: [
-    { label: "本日対象件数", value: 1284, subtext: "データ受取済み" },
-    { label: "3条件合流済み", value: 956, subtext: "PKGへ進行" },
-    { label: "未申告在庫", value: 74, subtext: "予備審査側で停止" },
-    { label: "未許可在庫", value: 49, subtext: "本申告後に滞留" },
-    { label: "許可済み", value: 824, subtext: "搬出可能" },
-    { label: "搬出済み", value: 768, subtext: "配送/次工程へ" },
+    {
+      label: "本日対象件数",
+      value: 1284,
+      subtext: "データ受取済み",
+      definition: "本日対象件数 = 当日対象フラグONかつ処理開始済みの申告案件数",
+    },
+    {
+      label: "3条件合流済み",
+      value: 956,
+      subtext: "PKGへ進行",
+      definition: "3条件合流済み = 予備審査完了 + BIN完了 + 必須属性充足の案件数",
+    },
+    {
+      label: "未申告在庫",
+      value: 74,
+      subtext: "予備審査側で停止",
+      definition: "未申告在庫 = 予備審査ルートで申告作成未了かつ滞留中の案件数",
+    },
+    {
+      label: "未許可在庫",
+      value: 49,
+      subtext: "本申告後に滞留",
+      definition: "未許可在庫 = 本申告送信後に許可結果未確定の案件数",
+    },
+    {
+      label: "許可済み",
+      value: 824,
+      subtext: "搬出可能",
+      definition: "許可済み = 税関許可済みで搬出可ステータスの案件数",
+    },
+    {
+      label: "搬出済み",
+      value: 768,
+      subtext: "配送/次工程へ",
+      definition: "搬出済み = 保税搬出が実績連携で確定した案件数",
+    },
   ],
   leftLane: [
     { name: "データ受取", subtext: "API / メール / 2.0", value: 1284 },
@@ -70,12 +127,61 @@ const mockData = {
     ],
   },
   alerts: [
-    { status: "未申告在庫", condition: "要確認", count: 74, color: "red" },
-    { status: "税関対応待ち", condition: "区分2", count: 83, color: "amber" },
-    { status: "書類確認追加", condition: "区分3", count: 49, color: "amber" },
-    { status: "滅却予定", condition: "終了系", count: 12, color: "red" },
-    { status: "搬出済み", condition: "完了", count: 768, color: "green" },
-  ],
+    {
+      status: "未申告在庫",
+      condition: "要確認",
+      count: 74,
+      color: "red",
+      severity: "High",
+      owner: "2課 通関士",
+      maxAgingMinutes: 188,
+    },
+    {
+      status: "税関対応待ち",
+      condition: "区分2",
+      count: 83,
+      color: "amber",
+      severity: "Medium",
+      owner: "1課 税関対応",
+      maxAgingMinutes: 96,
+    },
+    {
+      status: "書類確認追加",
+      condition: "区分3",
+      count: 49,
+      color: "amber",
+      severity: "Medium",
+      owner: "2課 書類担当",
+      maxAgingMinutes: 132,
+    },
+    {
+      status: "滅却予定",
+      condition: "終了系",
+      count: 12,
+      color: "red",
+      severity: "High",
+      owner: "管理者確認",
+      maxAgingMinutes: 244,
+    },
+    {
+      status: "搬出済み",
+      condition: "完了",
+      count: 768,
+      color: "green",
+      severity: "Low",
+      owner: "-",
+      maxAgingMinutes: 0,
+    },
+  ] as AlertItem[],
+  agingBuckets: [
+    { label: "30分超", count: 62, tone: "warning" },
+    { label: "60分超", count: 33, tone: "warning" },
+    { label: "120分超", count: 14, tone: "danger" },
+  ] as AgingBucket[],
+  freshness: {
+    updatedAt: "2026-06-18T04:52:00+09:00",
+    expectedCycleMinutes: 5,
+  },
   routeDecisions: [
     {
       region: "大阪/関西：集約利用・通常",
@@ -120,6 +226,43 @@ function getConditionColor(color: string) {
     default:
       return "bg-[#e2e8f0] text-[#475569] border border-[#cbd5e1]";
   }
+}
+
+function getSeverityBadgeClass(severity: AlertSeverity) {
+  switch (severity) {
+    case "High":
+      return "bg-[#fee2e2] text-[#b91c1c] border border-[#fecaca]";
+    case "Medium":
+      return "bg-[#fef3c7] text-[#b45309] border border-[#fde68a]";
+    case "Low":
+      return "bg-[#dcfce7] text-[#15803d] border border-[#bbf7d0]";
+    default:
+      return "bg-[#e2e8f0] text-[#475569] border border-[#cbd5e1]";
+  }
+}
+
+function getAgingToneClass(tone: AgingBucket["tone"]) {
+  switch (tone) {
+    case "danger":
+      return "bg-[#fee2e2] border-[#fecaca] text-[#b91c1c]";
+    case "warning":
+      return "bg-[#fff7ed] border-[#fed7aa] text-[#c2410c]";
+    default:
+      return "bg-[#f8fafc] border-[#d7dee9] text-[#334155]";
+  }
+}
+
+function computeFreshnessLabel(updatedAt: string): {
+  text: string;
+  lagMinutes: number;
+} {
+  const updated = new Date(updatedAt);
+  const now = new Date();
+  const lagMinutes = Math.max(0, Math.floor((now.getTime() - updated.getTime()) / 60000));
+  return {
+    text: `${updated.toLocaleString("ja-JP")} 更新`,
+    lagMinutes,
+  };
 }
 
 function Sidebar() {
@@ -214,6 +357,7 @@ function Header() {
             <div className="px-4 py-2.5 rounded-[12px] text-sm font-medium border border-[#d7dee9] bg-white text-[#64748b]">
               対象日：2026/05/21
             </div>
+            <FreshnessPill />
           </div>
         </div>
       </div>
@@ -221,7 +365,34 @@ function Header() {
   );
 }
 
-function KPICard({ label, value, subtext }: { label: string; value: number; subtext: string }) {
+function FreshnessPill() {
+  const freshness = computeFreshnessLabel(mockData.freshness.updatedAt);
+  const isStale = freshness.lagMinutes > mockData.freshness.expectedCycleMinutes * 2;
+
+  return (
+    <div
+      className={`px-4 py-2.5 rounded-[12px] text-sm font-semibold border ${
+        isStale
+          ? "bg-[#fff7ed] text-[#b45309] border-[#fed7aa]"
+          : "bg-[#ecfeff] text-[#0f766e] border-[#a5f3fc]"
+      }`}
+    >
+      {freshness.text}（遅延 {freshness.lagMinutes}分）
+    </div>
+  );
+}
+
+function KPICard({
+  label,
+  value,
+  subtext,
+  definition,
+}: {
+  label: string;
+  value: number;
+  subtext: string;
+  definition: string;
+}) {
   return (
     <div className="bg-white rounded-[16px] border border-[#d7dee9] p-[14px] shadow-[0_6px_18px_rgba(15,23,42,0.05)]">
       <div className="text-[12px] font-medium text-[#64748b]">{label}</div>
@@ -229,6 +400,7 @@ function KPICard({ label, value, subtext }: { label: string; value: number; subt
         {fmt(value)}
       </div>
       <div className="text-[12px] text-[#64748b] mt-2">{subtext}</div>
+      <div className="text-[10px] text-[#64748b] mt-2 leading-relaxed">定義: {definition}</div>
     </div>
   );
 }
@@ -328,6 +500,16 @@ function BranchContainer({ branches, title, badge }: { branches: BranchNode[]; t
 }
 
 function AlertTable() {
+  const router = useRouter();
+
+  function handleRowClick(status: string) {
+    const params = new URLSearchParams({
+      stage: "通関",
+      status,
+    });
+    router.push(`/cases?${params.toString()}`);
+  }
+
   return (
     <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] overflow-hidden">
       <div className="bg-white px-5 py-4 border-b border-[#d7dee9]">
@@ -339,23 +521,208 @@ function AlertTable() {
           <tr>
             <th className="px-5 py-3 text-left text-[12px] font-bold text-[#64748b]">分岐</th>
             <th className="px-5 py-3 text-center text-[12px] font-bold text-[#64748b]">状態</th>
+            <th className="px-5 py-3 text-center text-[12px] font-bold text-[#64748b]">重症度</th>
+            <th className="px-5 py-3 text-center text-[12px] font-bold text-[#64748b]">担当</th>
+            <th className="px-5 py-3 text-right text-[12px] font-bold text-[#64748b]">最大滞留(分)</th>
             <th className="px-5 py-3 text-right text-[12px] font-bold text-[#64748b]">件数</th>
           </tr>
         </thead>
         <tbody>
           {mockData.alerts.map((alert, idx) => (
-            <tr key={idx} className="border-b border-[#e2e8f0] hover:bg-[#f8fafc]">
+            <tr
+              key={idx}
+              className="border-b border-[#e2e8f0] hover:bg-[#f8fafc] cursor-pointer"
+              onClick={() => handleRowClick(alert.status)}
+              title="クリックで対象案件一覧へ"
+            >
               <td className="px-5 py-3.5 font-medium text-[#172033]">{alert.status}</td>
               <td className="px-5 py-3.5 text-center">
                 <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-bold ${getConditionColor(alert.color)}`}>
                   {alert.condition}
                 </span>
               </td>
+              <td className="px-5 py-3.5 text-center">
+                <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-bold ${getSeverityBadgeClass(alert.severity)}`}>
+                  {alert.severity}
+                </span>
+              </td>
+              <td className="px-5 py-3.5 text-center text-[12px] text-[#334155]">{alert.owner}</td>
+              <td className="px-5 py-3.5 text-right font-bold text-[#334155] tabular-nums">{fmt(alert.maxAgingMinutes)}</td>
               <td className="px-5 py-3.5 text-right font-extrabold text-[#172033] tabular-nums">{fmt(alert.count)}</td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function AgingCard() {
+  const [rows, setRows] = useState<AgingRow[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadAging() {
+      try {
+        const response = await fetch("/api/dashboard/customs/operational", {
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+
+        const body = (await response.json()) as OperationalInsights;
+
+        if (mounted) {
+          setRows(body.aging);
+        }
+      } catch {
+        // keep default mock data
+      }
+    }
+
+    loadAging();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const fallbackRows = [
+    { label: "未申告在庫", over30: 62, over60: 33, over120: 14 },
+    { label: "未許可在庫", over30: 41, over60: 21, over120: 9 },
+  ];
+
+  const sourceRows = rows.length > 0 ? rows : fallbackRows;
+
+  return (
+    <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-4">
+      <h3 className="font-bold text-[#172033] text-sm mb-1">滞留Aging</h3>
+      <p className="text-[12px] text-[#64748b] mb-4">未申告/未許可を30・60・120分超で層別</p>
+
+      <div className="space-y-3">
+        {sourceRows.map((row) => (
+          <div key={row.label} className="rounded-[12px] border border-[#d7dee9] bg-[#f8fafc] p-3">
+            <div className="text-[12px] font-bold text-[#172033]">{row.label}</div>
+            <div className="grid grid-cols-3 gap-2 mt-2">
+              <div className={`rounded-[10px] border p-2 text-center ${getAgingToneClass("warning")}`}>
+                <div className="text-[10px]">30分超</div>
+                <div className="text-[18px] font-extrabold tabular-nums">{fmt(row.over30)}</div>
+              </div>
+              <div className={`rounded-[10px] border p-2 text-center ${getAgingToneClass("warning")}`}>
+                <div className="text-[10px]">60分超</div>
+                <div className="text-[18px] font-extrabold tabular-nums">{fmt(row.over60)}</div>
+              </div>
+              <div className={`rounded-[10px] border p-2 text-center ${getAgingToneClass("danger")}`}>
+                <div className="text-[10px]">120分超</div>
+                <div className="text-[18px] font-extrabold tabular-nums">{fmt(row.over120)}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PriorityQueueCard() {
+  const [items, setItems] = useState<OperationalInsights["priorityQueue"]>([]);
+  const [formula, setFormula] = useState(
+    "score = 滞留分×0.2 + 重症度係数×20 + 工程重み×12 + 締切逼迫係数×15"
+  );
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadQueue() {
+      try {
+        const response = await fetch("/api/dashboard/customs/operational", {
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+
+        const body = (await response.json()) as OperationalInsights;
+        if (mounted) {
+          setItems(body.priorityQueue);
+          setFormula(body.formula.scoreFormula);
+        }
+      } catch {
+        // keep fallback
+      }
+    }
+
+    loadQueue();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const fallbackItems = useMemo(
+    () =>
+      mockData.alerts
+        .filter((item) => item.severity !== "Low")
+        .map((item, index) => ({
+          caseId: `CUS-10${index + 1}`,
+          route: "予備審査" as const,
+          stage: item.status,
+          dwellMin: item.maxAgingMinutes,
+          toCutoffMin: Math.max(0, 240 - Math.floor(item.maxAgingMinutes / 6)),
+          severity: item.severity,
+          score: item.count * 2 + item.maxAgingMinutes,
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5),
+    []
+  );
+
+  const sourceItems = items.length > 0 ? items : fallbackItems;
+
+  return (
+    <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-4">
+      <h3 className="font-bold text-[#172033] text-sm mb-1">優先対応キュー Top5</h3>
+      <p className="text-[12px] text-[#64748b] mb-3">{formula}</p>
+
+      <div className="space-y-2.5">
+        {sourceItems.map((item, idx) => (
+          <Link
+            key={item.caseId}
+            href={`/cases?stage=${encodeURIComponent("通関")}`}
+            className="block rounded-[12px] border border-[#d7dee9] p-3 bg-[#f8fafc] hover:bg-[#eef4ff] transition"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="text-xs text-[#64748b]">#{idx + 1}</div>
+                <div className="text-sm font-bold text-[#172033]">{item.caseId}</div>
+                <div className="text-[11px] text-[#64748b] mt-1">
+                  {item.route} / {item.stage} / 滞留 {item.dwellMin}分 / 締切まで {item.toCutoffMin}分
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-[11px] text-[#64748b]">スコア</div>
+                <div className="text-[22px] leading-none font-extrabold text-[#1e3a8a] tabular-nums">{fmt(item.score)}</div>
+              </div>
+            </div>
+          </Link>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function KpiDefinitionCard() {
+  return (
+    <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-4">
+      <h3 className="font-bold text-[#172033] text-sm mb-1">KPI定義</h3>
+      <p className="text-[12px] text-[#64748b] mb-3">現場解釈の揺れを防ぐため定義を明示</p>
+
+      <div className="space-y-2">
+        {mockData.kpis.slice(0, 4).map((kpi) => (
+          <div key={kpi.label} className="rounded-[12px] border border-[#d7dee9] p-3 bg-[#f8fafc]">
+            <div className="text-[12px] font-bold text-[#172033]">{kpi.label}</div>
+            <div className="text-[11px] text-[#64748b] mt-1 leading-relaxed">{kpi.definition}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -471,6 +838,8 @@ export default function CustomsDashboard() {
 
             <div className="space-y-4">
               <AlertTable />
+              <AgingCard />
+              <PriorityQueueCard />
 
               <div className="bg-white rounded-[18px] border border-[#d7dee9] shadow-[0_8px_22px_rgba(15,23,42,0.04)] p-4">
                 <h3 className="font-bold text-[#172033] text-sm mb-1">予備審査ルート判定</h3>
@@ -483,6 +852,7 @@ export default function CustomsDashboard() {
               </div>
 
               <ProgressCard />
+              <KpiDefinitionCard />
             </div>
           </div>
         </div>

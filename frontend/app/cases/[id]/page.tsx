@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getCaseById } from "@/lib/mockData";
+import { pool } from "@/lib/db";
 
 function formatAging(minutes: number) {
   const h = Math.floor(minutes / 60);
@@ -17,7 +18,112 @@ export default async function CaseDetailPage({
   const caseItem = getCaseById(id);
 
   if (!caseItem) {
-    notFound();
+    const dwellMatch = id.match(/^DWL-(.+)-\d+$/);
+    const dwellCode = dwellMatch ? dwellMatch[1] : null;
+
+    if (!dwellCode) {
+      notFound();
+    }
+
+    const latestResult = await pool.query<{ snapshot_at: string }>(
+      `SELECT MAX(snapshot_at) AS snapshot_at FROM stage_dwell_snapshot`
+    );
+
+    const snapshotAt = latestResult.rows[0]?.snapshot_at;
+
+    if (!snapshotAt) {
+      notFound();
+    }
+
+    const rowResult = await pool.query<{
+      dwell_name: string;
+      business_location_code: string | null;
+      total_count: number;
+      avg_dwell_minutes: number | null;
+      p95_dwell_minutes: number | null;
+      bucket_24h_count: number;
+      bucket_48h_count: number;
+      bucket_1w_count: number;
+      bucket_2w_count: number;
+      bucket_4w_over_count: number;
+    }>(
+      `SELECT
+         d.name_ja AS dwell_name,
+         s.business_location_code,
+         s.total_count,
+         s.avg_dwell_minutes,
+         s.p95_dwell_minutes,
+         s.bucket_24h_count,
+         s.bucket_48h_count,
+         s.bucket_1w_count,
+         s.bucket_2w_count,
+         s.bucket_4w_over_count
+       FROM stage_dwell_snapshot s
+       JOIN dwell_location_definition d ON d.code = s.dwell_location_code
+       WHERE s.snapshot_at = $1
+         AND s.dwell_location_code = $2
+       ORDER BY s.total_count DESC
+       LIMIT 1`,
+      [snapshotAt, dwellCode]
+    );
+
+    const row = rowResult.rows[0];
+    if (!row) {
+      notFound();
+    }
+
+    return (
+      <main className="min-h-screen bg-gray-100 px-4 py-5 md:px-6 lg:px-8">
+        <div className="max-w-[1200px] mx-auto space-y-4">
+          <div className="flex items-center justify-between bg-white border border-gray-200 rounded-lg px-5 py-4">
+            <div>
+              <h1 className="text-xl font-bold text-gray-900">案件詳細: {id}</h1>
+              <p className="text-sm text-gray-500 mt-1">DBスナップショット由来の通関滞留詳細</p>
+            </div>
+            <Link href="/cases?stage=通関" className="text-sm text-blue-600 hover:text-blue-800 font-semibold">
+              ← 案件一覧へ戻る
+            </Link>
+          </div>
+
+          <section className="bg-white border border-gray-200 rounded-lg p-4">
+            <h2 className="text-sm font-semibold text-gray-700 mb-3">滞留サマリー</h2>
+            <dl className="grid grid-cols-[180px_1fr] gap-y-2 text-sm">
+              <dt className="text-gray-500">滞留分類</dt><dd className="text-gray-900">{row.dwell_name}</dd>
+              <dt className="text-gray-500">拠点</dt><dd className="text-gray-900">{row.business_location_code ?? "-"}</dd>
+              <dt className="text-gray-500">滞留件数</dt><dd className="text-gray-900">{row.total_count}</dd>
+              <dt className="text-gray-500">平均滞留(分)</dt><dd className="text-gray-900">{Math.round(row.avg_dwell_minutes ?? 0)}</dd>
+              <dt className="text-gray-500">P95滞留(分)</dt><dd className="text-gray-900">{Math.round(row.p95_dwell_minutes ?? 0)}</dd>
+            </dl>
+          </section>
+
+          <section className="bg-white border border-gray-200 rounded-lg p-4">
+            <h2 className="text-sm font-semibold text-gray-700 mb-3">時間帯分布</h2>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+              <div className="rounded border border-gray-200 p-3">
+                <div className="text-gray-500">24h以内</div>
+                <div className="text-lg font-bold text-gray-900">{row.bucket_24h_count}</div>
+              </div>
+              <div className="rounded border border-gray-200 p-3">
+                <div className="text-gray-500">48h以内</div>
+                <div className="text-lg font-bold text-gray-900">{row.bucket_48h_count}</div>
+              </div>
+              <div className="rounded border border-gray-200 p-3">
+                <div className="text-gray-500">1週間以内</div>
+                <div className="text-lg font-bold text-gray-900">{row.bucket_1w_count}</div>
+              </div>
+              <div className="rounded border border-gray-200 p-3">
+                <div className="text-gray-500">2週間以内</div>
+                <div className="text-lg font-bold text-gray-900">{row.bucket_2w_count}</div>
+              </div>
+              <div className="rounded border border-red-200 bg-red-50 p-3">
+                <div className="text-red-700">4週間超</div>
+                <div className="text-lg font-bold text-red-700">{row.bucket_4w_over_count}</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    );
   }
 
   return (

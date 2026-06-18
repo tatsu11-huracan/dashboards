@@ -20,6 +20,29 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Authentication
+
+- Login page: `/login`
+- Protected routes: `/dashboard/**`
+
+### Required environment variables
+
+Set `AUTH_SECRET` in your environment.
+
+```bash
+AUTH_SECRET=replace-with-long-random-string
+```
+
+### Create a user
+
+Use the existing users API with password:
+
+```bash
+curl -X POST http://localhost:3000/api/users \
+	-H "Content-Type: application/json" \
+	-d '{"name":"Admin","email":"admin@example.com","password":"password123"}'
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
