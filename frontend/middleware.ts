@@ -3,7 +3,7 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 
 export async function middleware(request: NextRequest) {
   // Allow direct access to customs mock page when auth backend is unavailable.
-  if (request.nextUrl.pathname === "/dashboard/customs") {
+  if (request.nextUrl.pathname === "/dashboard/customs" || request.nextUrl.pathname === "/dashboard/bonded") {
     return NextResponse.next();
   }
 
